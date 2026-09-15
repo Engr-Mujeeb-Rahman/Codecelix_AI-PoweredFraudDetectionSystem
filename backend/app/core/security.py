@@ -8,7 +8,10 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+try:
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+except Exception:
+    pwd_context = None
 
 ROLE_ADMIN = "admin"
 ROLE_MANAGER = "business_manager"
@@ -17,12 +20,24 @@ ALL_ROLES = [ROLE_ADMIN, ROLE_MANAGER, ROLE_ANALYST]
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    try:
+        if pwd_context:
+            return pwd_context.hash(password)
+    except Exception:
+        pass
+    import bcrypt
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return pwd_context.verify(plain, hashed)
+        if pwd_context:
+            return pwd_context.verify(plain, hashed)
+    except Exception:
+        pass
+    try:
+        import bcrypt
+        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
     except Exception:
         return False
 

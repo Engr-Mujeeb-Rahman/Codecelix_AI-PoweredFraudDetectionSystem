@@ -39,9 +39,31 @@ def dashboard(db: Session = Depends(get_db), user=Depends(get_current_user)):
         db.query(Customer).order_by(Customer.total_transactions.desc()).limit(10).all()
     )
 
+    from app.models.risk_assessment import RiskAssessment
+    from app.models.device_usage import DeviceUsage
+
+    avg_score = db.query(func.avg(RiskAssessment.risk_score)).scalar() or 0.0
+    high_risk = db.query(func.count(RiskAssessment.id)).filter(RiskAssessment.risk_level == "HIGH").scalar() or 0
+    med_risk = db.query(func.count(RiskAssessment.id)).filter(RiskAssessment.risk_level == "MEDIUM").scalar() or 0
+    low_risk = db.query(func.count(RiskAssessment.id)).filter(RiskAssessment.risk_level == "LOW").scalar() or 0
+
+    suspicious_devices = (
+        db.query(DeviceUsage.device_id)
+        .group_by(DeviceUsage.device_id)
+        .having(func.count(DeviceUsage.customer_id) > 1)
+        .count()
+    )
+
     return {
         "transactions": {"total": total, "approved": approved, "review": review, "blocked": blocked},
         "alerts": {"new": alerts_new, "confirmed_fraud": confirmed, "false_positive": false_pos},
+        "risk_summary": {
+            "average_risk_score": round(float(avg_score), 1),
+            "high_risk_count": high_risk,
+            "medium_risk_count": med_risk,
+            "low_risk_count": low_risk,
+            "suspicious_devices_count": suspicious_devices,
+        },
         "activity_7d": [
             {"date": str(d), "transactions": c} for d, c in last7
         ],
@@ -51,3 +73,4 @@ def dashboard(db: Session = Depends(get_db), user=Depends(get_current_user)):
             for c in customers
         ],
     }
+

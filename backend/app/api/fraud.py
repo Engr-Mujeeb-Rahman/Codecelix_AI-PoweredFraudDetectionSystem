@@ -10,14 +10,18 @@ from app.crud.base import get_list, get_object, update_object
 from app.db.session import get_db
 from app.models.alert import ALERT_STATUSES, Alert
 from app.models.customer import Customer
+from app.models.customer_risk_profile import CustomerRiskProfile
 from app.models.investigation import Investigation
 from app.models.model_feedback import ModelFeedback
 from app.models.report import AuditLog, Report
+from app.models.risk_assessment import RiskAssessment
 from app.models.transaction import Transaction
 from app.schemas.customer import CustomerCreate, CustomerOut, CustomerUpdate
 from app.schemas.fraud import (AlertCreate, AlertOut, AlertUpdate, AuditLogOut, InvestigationCreate,
                                InvestigationOut, InvestigationUpdate, ModelFeedbackCreate,
                                ModelFeedbackOut, ReportOut)
+from app.schemas.risk import CustomerRiskProfileOut, RiskAssessmentOut
+from app.schemas.transaction import TransactionOut
 from app.utils.datetime import utcnow
 
 router = APIRouter()
@@ -54,6 +58,22 @@ def get_customer(customer_id: str, db: Session = Depends(get_db), user=Depends(g
     if not c:
         raise HTTPException(404, "Customer not found")
     return c
+
+
+@router.get("/customers/{customer_id}/risk-profile", response_model=CustomerRiskProfileOut)
+def get_customer_risk_profile(
+    customer_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Retrieves the dynamic AI CustomerRiskProfile row for a customer (404 if not yet scored)."""
+    c = db.query(Customer).filter((Customer.id == customer_id) |
+                                  (Customer.external_id == customer_id)).first()
+    target_id = c.id if c else customer_id
+    profile = db.query(CustomerRiskProfile).filter(CustomerRiskProfile.customer_id == target_id).first()
+    if not profile:
+        raise HTTPException(404, f"No risk profile found for customer '{customer_id}'")
+    return profile
 
 
 @router.patch("/customers/{customer_id}", response_model=CustomerOut)
@@ -137,6 +157,74 @@ def update_investigation(inv_id: str, data: InvestigationUpdate, db: Session = D
     if updates.get("status") == "closed":
         inv.closed_at = utcnow()
     return update_object(db, inv, updates)
+
+
+@router.get("/investigations/{inv_id}")
+def get_investigation_detail(
+    inv_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Full single-transaction investigation detail view linked to AI risk assessment,
+    customer history, and related alerts (Requirement 10).
+    """
+    inv = get_object(db, Investigation, inv_id)
+
+    # Linked RiskAssessment (joined on transaction_id)
+    assessment = (
+        db.query(RiskAssessment)
+        .filter(RiskAssessment.transaction_id == inv.transaction_id)
+        .first()
+    )
+    risk_data = None
+    if assessment:
+        risk_data = {
+            "id": assessment.id,
+            "risk_score": assessment.risk_score,
+            "risk_level": assessment.risk_level,
+            "decision": assessment.decision,
+            "ml_anomaly_score": assessment.ml_anomaly_score,
+            "rule_score": assessment.rule_score,
+            "customer_behavior_score": assessment.customer_behavior_score,
+            "triggered_rules": assessment.triggered_rules,
+            "detected_patterns": assessment.detected_patterns,
+            "ai_explanation": assessment.ai_explanation,
+            "created_at": assessment.created_at,
+        }
+
+    # Customer recent transaction history (reusing query logic from transactions.py detail view)
+    history = (
+        db.query(Transaction)
+        .filter(Transaction.customer_id == inv.customer_id, Transaction.id != inv.transaction_id)
+        .order_by(Transaction.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    # Related alerts for the same transaction or customer
+    related_alerts = (
+        db.query(Alert)
+        .filter((Alert.transaction_id == inv.transaction_id) | (Alert.customer_id == inv.customer_id))
+        .order_by(Alert.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    return {
+        "id": inv.id,
+        "transaction_id": inv.transaction_id,
+        "customer_id": inv.customer_id,
+        "analyst_id": inv.analyst_id,
+        "status": inv.status,
+        "notes": inv.notes,
+        "conclusion": inv.conclusion,
+        "created_at": inv.created_at,
+        "updated_at": inv.updated_at,
+        "closed_at": inv.closed_at,
+        "risk_assessment": risk_data,
+        "customer_history": [TransactionOut.model_validate(t).model_dump() for t in history],
+        "related_alerts": [AlertOut.model_validate(a).model_dump() for a in related_alerts],
+    }
 
 
 # ---------- Model feedback ----------

@@ -30,10 +30,26 @@ class Settings(BaseSettings):
     # Internal worker key
     WORKER_API_KEY: Optional[str] = None
 
+    # LLM settings
+    LLM_PROVIDER: str = "gemini"
+    GEMINI_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+
+    # Cache & Background Tasks
+    REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+
+    # Risk Engine Thresholds
+    RISK_THRESHOLD_LOW: float = 30.0
+    RISK_THRESHOLD_HIGH: float = 70.0
+    CRITICAL_RISK_THRESHOLD: float = 85.0
+
     class Config:
-        env_file = ".env"
+        env_file = (".env", "backend/.env")
         env_file_encoding = "utf-8"
         case_sensitive = True
+        extra = "ignore"
 
 
 @lru_cache()

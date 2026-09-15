@@ -10,3 +10,6 @@ from app.models.alert import Alert  # noqa: F401
 from app.models.investigation import Investigation  # noqa: F401
 from app.models.model_feedback import ModelFeedback  # noqa: F401
 from app.models.report import Report, AuditLog  # noqa: F401
+from app.models.rule import FraudRule  # noqa: F401
+from app.models.risk_assessment import RiskAssessment  # noqa: F401
+from app.models.customer_risk_profile import CustomerRiskProfile  # noqa: F401

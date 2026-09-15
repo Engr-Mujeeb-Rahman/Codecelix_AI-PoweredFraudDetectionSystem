@@ -1,172 +1,161 @@
-# Fraud & Risk Detection Platform — Backend (Database + CRUD APIs)
+# Codecelix Backend — AI Fraud & Risk Detection Platform
 
-FastAPI + SQLAlchemy 2.0 + PostgreSQL backend providing the **database setup and CRUD APIs**:
-users & roles, customers, transactions, devices, IP addresses, alerts, investigations,
-feedback, reports, and audit logs. JWT auth + role-based access + API-key auth for
-external integrations.
+Enterprise FastAPI + SQLAlchemy 2.0 + PostgreSQL backend providing:
+1. **Database & Schema**: 15 tables on PostgreSQL (Supabase) with native binary `JSONB` for rules and risk assessments.
+2. **AI Risk Scoring Engine**: Real-time multi-factor scoring (0–100) combining ML Anomaly Detection + Configurable Rules + Customer Behavior into an automated decision (`APPROVE`, `REVIEW`, `BLOCK`).
+3. **ML Anomaly Detection**: Statistical Z-scores for cold-start (<50 txns) and Scikit-Learn `IsolationForest` on historical feature vectors with a live retraining loop.
+4. **Fraud Pattern Detectors**: 6 specialized algorithms (velocity, device sharing, IP clustering, location anomalies, impossible travel, behavior shifts).
+5. **Configurable Rules Engine**: AST condition-tree evaluator supporting composite `AND`/`OR` rules with admin CRUD and immediate score impacts.
+6. **Dual-Mode AI Explanations**: Sub-5ms deterministic bullet points returned synchronously + asynchronous **Google Gemini 2.5 Flash** summary enrichment post-response.
+7. **AI Investigation Assistant**: Natural language analyst Q&A powered by Gemini and grounded in real database context (`POST /api/assistant/query`).
+8. **Unified Investigation View**: Single-item case view (`GET /api/investigations/{id}`) joining transactions, risk assessments, customer history, and related alerts.
+9. **Dynamic Customer Risk Profiles**: Dedicated reader (`GET /api/customers/{id}/risk-profile`) maintaining rolling scores, device counts, and location counts.
+10. **Security & RBAC**: JWT bearer tokens with 3 distinct roles (`admin`, `business_manager`, `analyst`) and hashed merchant API keys (`X-API-Key`).
 
-The database ships **empty** — no demo data. You create your own users via the register API.
+---
 
 ## Quick Start
 
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate            # Windows  (Linux/Mac: source venv/bin/activate)
+venv\Scripts\activate            # Windows (Linux/Mac: source venv/bin/activate)
 pip install -r requirements.txt
 
-# 1. Make sure DATABASE_URL in .env points to your PostgreSQL instance, then:
-python init_db.py                # creates all tables (empty)
+# 1. Ensure backend/.env contains your DATABASE_URL and GEMINI_API_KEY
+python init_db.py                # provisions all 15 tables and seeds default fraud rules
 
 # 2. Start the API
 uvicorn app.main:app --reload --port 8000
 ```
 
-Interactive docs: http://localhost:8000/docs
+* Interactive Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
+* ReDoc UI: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+* Health probe: [http://localhost:8000/health](http://localhost:8000/health)
 
-### First user
+---
 
-There is no seeded login. Register your first user and use it for everything
-(created users can manage others via admin endpoints):
+## Testing & Verification
 
-```bash
-curl -X POST http://localhost:8000/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "admin@yourcompany.com", "password": "YourPassword123", "full_name": "Admin", "role": "admin"}'
-```
-
-Then login:
+### 1. AI Layer End-to-End Test Suite (16 Test Cases)
+Verifies rules evaluation, 6 pattern detectors, ML scoring, Gemini explanations, investigations risk linkage, customer risk profiles, and assistant Q&A on an isolated SQLite database:
 
 ```bash
-curl -X POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "admin@yourcompany.com", "password": "YourPassword123"}'
+python test_ai_layer.py
 ```
 
-The response contains the `access_token` — send it as `Authorization: Bearer <token>`.
-
-### Database management
-
-```bash
-python init_db.py          # create all tables (skips existing)
-python init_db.py --drop   # drop all tables, then recreate (destructive!)
-```
-
-### Reset to an empty database
-
-```bash
-python -c "from app.db.session import engine, Base; import app.models; Base.metadata.drop_all(bind=engine)"
-python init_db.py
-```
-
-### Smoke test (uses a throwaway SQLite DB, never touches your Postgres)
+### 2. Pre-Existing CRUD & Auth Regression Suite (18 Test Cases)
+Verifies authentication, RBAC permissions, transaction detail views, CSV ingestion, alerts, and customer profile aggregate recomputation:
 
 ```bash
 python smoke_test.py
 ```
 
-## Roles
+---
 
-| Role | Access |
+## Database Schema (15 Tables on PostgreSQL)
+
+All tables use UUID primary keys and UTC timestamps. Tables with JSON structures use native PostgreSQL binary `JSONB`:
+
+| Table | Type | Purpose |
+|---|---|---|
+| `users` | Core | Internal platform users (`admin`, `business_manager`, `analyst`), bcrypt hashed passwords. |
+| `api_clients` | Core | External merchants, hashed API keys (`X-API-Key`), usage counters. |
+| `customers` | Core | Customer profiles + aggregates (`avg_amount`, `suspicious_transactions`, velocity counters). |
+| `transactions` | Core | Financial transaction records with customer, device, IP, and status links. |
+| `devices` | Core | Hardware device fingerprints and first-seen timestamps. |
+| `device_usages` | Core | Link table mapping customers to devices with usage frequency. |
+| `ip_addresses` | Core | IP records with geo-location (country, city) and VPN flags. |
+| `alerts` | Core | Fraud alerts with status workflow (`new`, `investigating`, `confirmed_fraud`, `false_positive`, `resolved`). |
+| `investigations` | Core | Analyst case files with notes and resolution conclusions. |
+| `model_feedback` | Core | Analyst review records feeding the ML retraining loop. |
+| `reports` | Core | Generated daily/monthly fraud activity reports. |
+| `audit_logs` | Core | Tamper-evident audit trail for sensitive actions. |
+| `fraud_rules` | **AI/Risk** | Admin fraud rules with native `JSONB` condition trees and score impacts. |
+| `risk_assessments` | **AI/Risk** | Full risk evaluation breakdown with native `JSONB` triggered rules and pattern logs. |
+| `customer_risk_profiles`| **AI/Risk** | Dynamic rolling customer risk scores, levels, device counts, and location counts. |
+
+---
+
+## Role-Based Access Control (RBAC)
+
+| Role | Permissions |
 |---|---|
-| `admin` | Everything: user management, API clients, reports, audit logs, deletes |
-| `business_manager` | Customers, alerts, reports, CSV import |
-| `analyst` | Read APIs, alerts review, investigations, feedback |
+| `admin` | Full platform access: user management, merchant API keys, rule creation/deletion, model retraining, report exports, audit logs. |
+| `business_manager` | Dashboard, transaction management (manual entry, CSV import), customer views, network graph, report generation. |
+| `analyst` | Read-only transactions, alert review & status updates, investigation workspace & notes, AI Investigation Assistant, network graph. |
 
-## Project Structure
-
-```
-backend/
-├── app/
-│   ├── main.py                 # FastAPI app + router mounting
-│   ├── core/
-│   │   ├── config.py           # Settings from .env
-│   │   ├── security.py         # bcrypt, JWT, API-key hashing
-│   │   └── deps.py             # get_current_user, require_roles, get_api_client
-│   ├── db/session.py           # engine, SessionLocal, Base, get_db
-│   ├── models/                 # SQLAlchemy 2.0 models (12 tables)
-│   ├── schemas/                # Pydantic v2 request/response models
-│   ├── crud/
-│   │   ├── base.py             # generic list/get/create/update/delete
-│   │   └── fraud.py            # domain CRUD (profiles, alerts, investigations)
-│   ├── api/                    # routers: auth, transactions, fraud, network, dashboard
-│   └── utils/datetime.py
-├── init_db.py                  # creates all tables (no data)
-├── smoke_test.py               # end-to-end API test (SQLite, throwaway)
-└── requirements.txt
-```
-
-## Database Schema (12 tables)
-
-| Table | Purpose |
-|---|---|
-| `users` | Admin / Business Manager / Analyst, bcrypt passwords |
-| `api_clients` | External businesses, hashed API keys + quota |
-| `customers` | Customer profile + transaction aggregates (counts, avg/min/max, velocity) |
-| `transactions` | Transactions with customer/device/IP links and status |
-| `devices` | Device fingerprints |
-| `device_usages` | Customer↔device link table |
-| `ip_addresses` | IPs, geo, VPN flag |
-| `alerts` | Alerts with status workflow (new/investigating/confirmed_fraud/false_positive/resolved) |
-| `investigations` | Analyst case notes |
-| `model_feedback` | Analyst feedback (confirmed fraud / false positive) |
-| `reports` | Generated report payloads |
-| `audit_logs` | Audit trail of sensitive actions |
+---
 
 ## API Reference
 
-Auth: `POST /api/auth/register` · `POST /api/auth/login` · `GET /api/auth/me` ·
-`GET/PATCH /api/auth/users` (admin) · `POST/GET /api/auth/api-clients` (admin)
+### 1. Authentication & Users
+* `POST /api/auth/register` — Register a new user (`admin`, `business_manager`, `analyst`).
+* `POST /api/auth/login` — Authenticate and receive a JWT Bearer access token.
+* `GET /api/auth/me` — Current user profile.
+* `GET /api/auth/users` — List platform users (Admin only).
+* `POST /api/auth/api-clients` — Generate a merchant `X-API-Key` (Admin only).
 
-Transactions (JWT): `GET /api/transactions` (search, filters, pagination) ·
-`GET /api/transactions/{id}` · `GET /api/transactions/{id}/details` (full view with
-customer, history, devices, IPs, related txns) · `POST /api/transactions/import/csv`
+### 2. Real-Time Risk Scoring
+* `POST /api/risk-check` — **Synchronous Pre-Flight Scoring**: Evaluates a transaction in sub-5ms without writing to the database. Returns risk score, decision (`APPROVE`/`REVIEW`/`BLOCK`), triggered rules, and explanation.
+* `GET /api/risk/{txn_id}` — Retrieves the persisted `RiskAssessment` record and explanation for a stored transaction.
+* `POST /api/risk/retrain` — Triggers live retraining of the `IsolationForest` anomaly model on updated historical feature vectors (Admin only).
+* `GET /api/risk-metrics` — Retrieves model precision, recall, and feedback counts.
 
-External API (X-API-Key header): `POST /api/transactions`
+### 3. Transaction Management
+* `POST /api/transactions` — External merchant transaction submission via `X-API-Key` header with automatic risk scoring and alert generation.
+* `POST /api/transactions/manual` — Internal dashboard manual entry with auto-scoring (Admin / Business Manager).
+* `POST /api/transactions/import/csv` — Drag-and-drop CSV batch transaction upload with automated risk scoring.
+* `GET /api/transactions` — Paginated transaction listing with multi-field search and filters (status, amount range, date range, customer).
+* `GET /api/transactions/{id}` — Single transaction record.
+* `GET /api/transactions/{id}/details` — Complete transaction view with linked customer profile, 20-transaction history, associated devices, and IPs.
 
-Fraud domain: `GET/POST/PATCH/DELETE /api/customers` · `GET/POST /api/alerts` ·
-`POST /api/alerts/{id}/review` · `GET/POST /api/investigations` ·
-`PATCH /api/investigations/{id}` · `GET/POST /api/feedback` ·
-`GET/POST /api/reports` + `GET /api/reports/{id}/export?format=csv|json` ·
-`GET /api/audit-logs` (admin)
+### 4. Fraud Rules Engine
+* `GET /api/rules` — List all active fraud rules and condition trees.
+* `POST /api/rules` — Create a new fraud rule with condition tree and score impact (Admin only).
+* `GET /api/rules/{id}` — Retrieve rule details.
+* `PATCH /api/rules/{id}` — Update rule status (`is_active`), score impact, or conditions (Admin only).
+* `DELETE /api/rules/{id}` — Delete a fraud rule (Admin only).
 
-Dashboard & network: `GET /api/dashboard` (counts, 7-day activity, top customers) ·
-`GET /api/network` (customer↔device↔IP graph data)
+### 5. Investigations & Case Review
+* `GET /api/investigations` — List open and closed investigation cases.
+* `POST /api/investigations` — Open an investigation case for a transaction.
+* `GET /api/investigations/{id}` — **Full Risk-Linked Detail View**: Returns investigation metadata, linked `RiskAssessment` (or `None` if unscored), customer recent transaction history, and related alerts.
+* `PATCH /api/investigations/{id}` — Update analyst notes, case conclusion, or close case.
 
-### Example: submit a transaction externally
+### 6. Customer Risk Profiles
+* `GET /api/customers/{id}/risk-profile` — Dedicated reader returning dynamic risk scores, risk levels, unique devices used, and unique locations used (returns 404 if customer is unscored).
+* `GET /api/customers` — Paginated customer directory with aggregate counters.
+* `GET /api/customers/{id}` — Single customer identity profile.
 
-First create an API client (admin JWT required):
+### 7. AI Investigation Assistant
+* `POST /api/assistant/query` — Natural language Q&A endpoint powered by Google Gemini 2.5 Flash with database RAG context.
+  * Supports contextual inquiries regarding customer risk, device clusters, and case summaries.
 
-```bash
-curl -X POST http://localhost:8000/api/auth/api-clients \
-  -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
-  -d '{"name": "My Store"}'
+### 8. Fraud Alerts & Network Graph
+* `GET /api/alerts` — List alerts with status and severity filters.
+* `POST /api/alerts/{id}/review` — Review alert status (`confirmed_fraud` / `false_positive`) and record analyst feedback for model improvement.
+* `GET /api/network` — Returns graph nodes (`customers`, `devices`, `ips`) and link edges for network visualization.
+* `GET /api/dashboard` — Aggregated KPI metrics, risk distributions, and 7-day trend activity.
+
+---
+
+## Environment Variables
+
+Configured in `backend/.env`:
+
+```env
+# PostgreSQL connection string (Supabase)
+DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<dbname>
+
+# JWT Security
+SECRET_KEY=your-production-secret-key
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+
+# CORS Whitelist (comma-separated origins)
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Google Gemini API Key for LLM explanations and AI Assistant
+GEMINI_API_KEY=your-gemini-api-key
 ```
-
-The response contains `api_key` — shown only once. Then:
-
-```bash
-curl -X POST http://localhost:8000/api/transactions \
-  -H "X-API-Key: <your-key>" -H "Content-Type: application/json" \
-  -d '{
-    "customer_id": "CUST-1029",
-    "amount": 1200.00,
-    "payment_method": "card",
-    "ip_address": "203.0.113.7",
-    "device_id": "device-x",
-    "country": "US"
-  }'
-```
-
-## Security
-
-- bcrypt password hashing, JWT bearer tokens with role claims
-- Role-based access on every endpoint (analyst < business_manager < admin)
-- Hashed API keys for external integrations (raw key shown only once at creation)
-- Audit logging of alert reviews
-
-## Notes
-
-- Alembic is included in requirements for production migrations
-  (`alembic init migrations` + point to `app.db.session.Base.metadata`).
-- Scoring/ML/rule-engine logic is intentionally excluded — this is the database + CRUD layer only.

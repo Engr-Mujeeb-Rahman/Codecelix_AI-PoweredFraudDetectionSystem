@@ -2,7 +2,7 @@ from datetime import datetime
 from io import StringIO
 import csv as csv_module
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_api_client, get_current_user, require_roles
@@ -12,21 +12,115 @@ from app.db.session import get_db
 from app.models.api_client import ApiClient
 from app.models.customer import Customer
 from app.models.transaction import Transaction, create_transaction_from_payload
+from app.models.risk_assessment import RiskAssessment
+from app.schemas.risk import RiskAssessmentOut
 from app.schemas.transaction import TransactionCreate, TransactionOut
+from app.services.decision_engine import evaluate_transaction_risk
 
 router = APIRouter()
+
+
+async def enhance_risk_assessment_explanation(assessment_id: str):
+    """Asynchronously enhances a stored RiskAssessment's ai_explanation using LLM.
+
+    NOTE: This is explicitly an in-process stopgap using FastAPI BackgroundTasks, NOT
+    equivalent to a distributed task queue (Celery/Redis). Fast-path scoring is 100%
+    deterministic at response time, and this LLM enhancement is applied asynchronously after.
+    """
+    from app.db.session import SessionLocal
+    from app.models.risk_assessment import RiskAssessment
+    from app.services.explanation import generate_llm_explanation
+
+    try:
+        with SessionLocal() as db:
+            assessment = db.query(RiskAssessment).filter(RiskAssessment.id == assessment_id).first()
+            if not assessment:
+                return
+            deterministic_text = assessment.ai_explanation
+            summary_info = {
+                "risk_score": assessment.risk_score,
+                "risk_level": assessment.risk_level,
+                "decision": assessment.decision,
+                "triggered_rules": assessment.triggered_rules,
+                "detected_patterns": assessment.detected_patterns,
+            }
+            enhanced = await generate_llm_explanation(
+                risk_score=assessment.risk_score,
+                risk_level=assessment.risk_level,
+                deterministic_text=deterministic_text,
+                transaction_summary=summary_info,
+            )
+            if enhanced and enhanced != deterministic_text:
+                assessment.ai_explanation = enhanced
+                db.commit()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Background LLM explanation enhancement failed for assessment %s: %s",
+            assessment_id, exc
+        )
 
 
 @router.post("", response_model=TransactionOut, status_code=201)
 def create_transaction(
     data: TransactionCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     client: ApiClient = Depends(get_api_client),
 ):
-    """External API: submit a transaction (creates customer/device/IP rows as needed)."""
+    """External API: submit a transaction (creates customer/device/IP rows as needed and triggers risk scoring)."""
     txn = create_transaction_from_payload(db, data.model_dump())
     update_customer_profile(db, txn.customer_id)
+    risk_res = evaluate_transaction_risk(
+        db=db,
+        amount=txn.amount,
+        customer_id=txn.customer_id,
+        payment_method=txn.payment_method,
+        currency=txn.currency,
+        device_id=txn.device_id,
+        ip_address=txn.ip_address_str,
+        country=txn.country,
+        city=txn.city,
+        device_info=txn.device_info,
+        created_at=txn.created_at,
+        txn_record=txn,
+        auto_alert=True,
+    )
+    if risk_res.get("assessment_id"):
+        background_tasks.add_task(enhance_risk_assessment_explanation, risk_res["assessment_id"])
     client.requests_count += 1
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
+@router.post("/manual", response_model=TransactionOut, status_code=201)
+def create_manual_transaction(
+    data: TransactionCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user=Depends(require_roles("admin", "business_manager")),
+):
+    """Internal API: manually add a transaction from dashboard (Requirement 2)."""
+    txn = create_transaction_from_payload(db, data.model_dump())
+    update_customer_profile(db, txn.customer_id)
+    risk_res = evaluate_transaction_risk(
+        db=db,
+        amount=txn.amount,
+        customer_id=txn.customer_id,
+        payment_method=txn.payment_method,
+        currency=txn.currency,
+        device_id=txn.device_id,
+        ip_address=txn.ip_address_str,
+        country=txn.country,
+        city=txn.city,
+        device_info=txn.device_info,
+        created_at=txn.created_at,
+        txn_record=txn,
+        auto_alert=True,
+    )
+    if risk_res.get("assessment_id"):
+        background_tasks.add_task(enhance_risk_assessment_explanation, risk_res["assessment_id"])
     db.commit()
     db.refresh(txn)
     return txn
@@ -111,6 +205,11 @@ def transaction_details(txn_id: str, db: Session = Depends(get_db), user=Depends
         related += db.query(Transaction).filter(
             Transaction.ip_id == txn.ip_id, Transaction.customer_id != customer.id
         ).limit(10).all()
+    assessment = (
+        db.query(RiskAssessment)
+        .filter(RiskAssessment.transaction_id == txn.id)
+        .first()
+    )
     return {
         "transaction": TransactionOut.model_validate(txn).model_dump(),
         "customer": {
@@ -123,11 +222,13 @@ def transaction_details(txn_id: str, db: Session = Depends(get_db), user=Depends
         "devices": devices,
         "ip_addresses": ips,
         "related_transactions": [TransactionOut.model_validate(t).model_dump() for t in related],
+        "risk_assessment": RiskAssessmentOut.model_validate(assessment).model_dump() if assessment else None,
     }
 
 
 @router.post("/import/csv", response_model=dict)
 async def import_csv(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user=Depends(require_roles("admin", "business_manager")),
@@ -152,6 +253,23 @@ async def import_csv(
             }
             txn = create_transaction_from_payload(db, payload)
             update_customer_profile(db, txn.customer_id)
+            risk_res = evaluate_transaction_risk(
+                db=db,
+                amount=txn.amount,
+                customer_id=txn.customer_id,
+                payment_method=txn.payment_method,
+                currency=txn.currency,
+                device_id=txn.device_id,
+                ip_address=txn.ip_address_str,
+                country=txn.country,
+                city=txn.city,
+                device_info=txn.device_info,
+                created_at=txn.created_at,
+                txn_record=txn,
+                auto_alert=True,
+            )
+            if risk_res.get("assessment_id"):
+                background_tasks.add_task(enhance_risk_assessment_explanation, risk_res["assessment_id"])
             created += 1
         except Exception as e:
             errors.append({"line": i, "error": str(e)})
