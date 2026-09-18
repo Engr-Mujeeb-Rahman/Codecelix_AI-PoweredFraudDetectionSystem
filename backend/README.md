@@ -1,9 +1,9 @@
 # Codecelix Backend — AI Fraud & Risk Detection Platform
 
 Enterprise FastAPI + SQLAlchemy 2.0 + PostgreSQL backend providing:
-1. **Database & Schema**: 15 tables on PostgreSQL (Supabase) with native binary `JSONB` for rules and risk assessments.
-2. **AI Risk Scoring Engine**: Real-time multi-factor scoring (0–100) combining ML Anomaly Detection + Configurable Rules + Customer Behavior into an automated decision (`APPROVE`, `REVIEW`, `BLOCK`).
-3. **ML Anomaly Detection**: Statistical Z-scores for cold-start (<50 txns) and Scikit-Learn `IsolationForest` on historical feature vectors with a live retraining loop.
+1. **Database & Schema**: 15 tables on PostgreSQL (Supabase) with native binary `JSONB` for rules, triggered events, and risk assessments.
+2. **AI Risk Scoring Engine**: Real-time multi-factor scoring (0–100) combining **45% ML Anomaly Detection + 35% Configurable Rules + 20% Customer Behavior** into an automated decision (`APPROVE`, `REVIEW`, `BLOCK`).
+3. **Hybrid ML Anomaly Detection**: Primary pipeline `synthetic_fraud_pipeline.joblib` combining **75% supervised XGBoost + 25% unsupervised Isolation Forest** evaluated over 43 features with piecewise calibration (`0–30` Low, `31–70` Medium, `71–100` High) matching `report.txt`.
 4. **Fraud Pattern Detectors**: 6 specialized algorithms (velocity, device sharing, IP clustering, location anomalies, impossible travel, behavior shifts).
 5. **Configurable Rules Engine**: AST condition-tree evaluator supporting composite `AND`/`OR` rules with admin CRUD and immediate score impacts.
 6. **Dual-Mode AI Explanations**: Sub-5ms deterministic bullet points returned synchronously + asynchronous **Google Gemini 2.5 Flash** summary enrichment post-response.
@@ -37,19 +37,66 @@ uvicorn app.main:app --reload --port 8000
 
 ## Testing & Verification
 
-### 1. AI Layer End-to-End Test Suite (16 Test Cases)
-Verifies rules evaluation, 6 pattern detectors, ML scoring, Gemini explanations, investigations risk linkage, customer risk profiles, and assistant Q&A on an isolated SQLite database:
+The backend includes a comprehensive **Software Testing Pyramid** covering unit components, whitebox logic, blackbox REST contracts, and full regression suites.
+
+### 1. Consolidated Master Test Runner
+Runs all 5 test suites sequentially and outputs an executive quality audit report:
 
 ```bash
+python run_all_tests.py
+```
+
+**Consolidated Test Report:**
+```text
+===========================================================================
+                      CONSOLIDATED TEST AUDIT REPORT
+===========================================================================
+Test Suite                                    | Duration   | Status
+---------------------------------------------------------------------------
+1. Component-Level (Unit) Suite               | 16.03s     | [PASS] PASSED
+2. Whitebox (Internal Logic) Suite            | 13.67s     | [PASS] PASSED
+3. Blackbox (REST API & RBAC) Suite           | 26.15s     | [PASS] PASSED
+4. Regression Suite (CRUD & Auth Smoke Test)  | 17.82s     | [PASS] PASSED
+5. Regression Suite (AI Layer E2E Test)       | 26.53s     | [PASS] PASSED
+---------------------------------------------------------------------------
+Total Execution Time                          | 100.19s
+===========================================================================
+
+[SUCCESS] ALL TEST SUITES PASSED WITH 100% SUCCESS RATE!
+```
+
+### 2. Pytest Test Suites
+```bash
+# Tier 1: Component-Level Unit Tests (43D features, ML hybrid pipeline, 6 pattern detectors, AST, crypto)
+pytest tests/test_components_unit.py -v
+
+# Tier 2: Whitebox Logic Tests (scoring formula weights, critical overrides, DB side effects, customer profiles)
+pytest tests/test_whitebox_paths.py -v
+
+# Tier 3: Blackbox REST API Tests (HTTP status codes, RBAC permissions, CSV import, cases, graph analytics)
+pytest tests/test_blackbox_api.py -v
+```
+
+### 3. Regression Suites
+```bash
+# Tier 4a: CRUD & Auth Regression Suite (18 checks)
+python smoke_test.py
+
+# Tier 4b: End-to-End AI & Risk Intelligence Suite (16 checks)
 python test_ai_layer.py
 ```
 
-### 2. Pre-Existing CRUD & Auth Regression Suite (18 Test Cases)
-Verifies authentication, RBAC permissions, transaction detail views, CSV ingestion, alerts, and customer profile aggregate recomputation:
+---
 
-```bash
-python smoke_test.py
-```
+## Machine Learning Pipelines (`backend/app/ml/artifacts/`)
+
+| File | Architecture | Features | Role |
+|:---|:---|:---|:---|
+| **`synthetic_fraud_pipeline.joblib`** | **Hybrid Ensemble** (75% XGBoost + 25% Isolation Forest) | 43 raw transactional + 1 anomaly score = 44 features | **Primary Production Model** powering `/api/risk-check` and `/api/transactions` |
+| **`ulb_hybrid_fraud_pipeline.joblib`** | Hybrid Credit-Card PCA Pipeline | 37 features (`V1`–`V28`, Amount, Time) | Benchmark model for credit card PCA datasets |
+| **`final_fraud_pipeline.pkl`** | IEEE-CIS Pipeline | 75 features (`card1`–`card6`, `C1`–`C14`, `D1`–`D15`, `id_01`–`id_20`) | Benchmark model for e-commerce identity datasets |
+| **`report.txt`** | Canonical Thresholds | Decision tiers: `0–30` Low, `31–70` Medium, `71–100` High | Operational decision matrix |
+| **`Old/`** | Archived Baseline | 10-feature interim model | Preserved for rollback safety |
 
 ---
 
@@ -98,64 +145,33 @@ All tables use UUID primary keys and UTC timestamps. Tables with JSON structures
 
 ### 2. Real-Time Risk Scoring
 * `POST /api/risk-check` — **Synchronous Pre-Flight Scoring**: Evaluates a transaction in sub-5ms without writing to the database. Returns risk score, decision (`APPROVE`/`REVIEW`/`BLOCK`), triggered rules, and explanation.
-* `GET /api/risk/{txn_id}` — Retrieves the persisted `RiskAssessment` record and explanation for a stored transaction.
-* `POST /api/risk/retrain` — Triggers live retraining of the `IsolationForest` anomaly model on updated historical feature vectors (Admin only).
-* `GET /api/risk-metrics` — Retrieves model precision, recall, and feedback counts.
+* `GET /api/risk/{transaction_id}` — Retrieves the stored risk assessment, AI explanation, and raw feature snapshot.
+* `GET /api/risk-metrics` — Retrieves model performance indicators (active model status, precision, recall, review breakdown).
+* `POST /api/risk/retrain` — Triggers automated background model retraining using analyst-labeled feedback (Admin only).
 
-### 3. Transaction Management
-* `POST /api/transactions` — External merchant transaction submission via `X-API-Key` header with automatic risk scoring and alert generation.
-* `POST /api/transactions/manual` — Internal dashboard manual entry with auto-scoring (Admin / Business Manager).
-* `POST /api/transactions/import/csv` — Drag-and-drop CSV batch transaction upload with automated risk scoring.
-* `GET /api/transactions` — Paginated transaction listing with multi-field search and filters (status, amount range, date range, customer).
-* `GET /api/transactions/{id}` — Single transaction record.
-* `GET /api/transactions/{id}/details` — Complete transaction view with linked customer profile, 20-transaction history, associated devices, and IPs.
+### 3. Transactions
+* `POST /api/transactions` — Merchant transaction ingestion via `X-API-Key`.
+* `POST /api/transactions/manual` — Internal dashboard manual entry (Admin / Business Manager).
+* `POST /api/transactions/import/csv` — Bulk CSV import with batch scoring (Admin / Business Manager).
+* `GET /api/transactions` — Paginated list with filtering and search.
+* `GET /api/transactions/{id}/details` — Complete 360-degree transaction view (customer history, linked devices, IPs, related transactions).
 
-### 4. Fraud Rules Engine
+### 4. Rules Engine
 * `GET /api/rules` — List all active fraud rules and condition trees.
-* `POST /api/rules` — Create a new fraud rule with condition tree and score impact (Admin only).
-* `GET /api/rules/{id}` — Retrieve rule details.
-* `PATCH /api/rules/{id}` — Update rule status (`is_active`), score impact, or conditions (Admin only).
-* `DELETE /api/rules/{id}` — Delete a fraud rule (Admin only).
+* `POST /api/rules` — Create a new rule (Admin only).
+* `PATCH /api/rules/{id}` — Update conditions, status, or score impact.
+* `DELETE /api/rules/{id}` — Delete rule (Admin only).
 
-### 5. Investigations & Case Review
-* `GET /api/investigations` — List open and closed investigation cases.
-* `POST /api/investigations` — Open an investigation case for a transaction.
-* `GET /api/investigations/{id}` — **Full Risk-Linked Detail View**: Returns investigation metadata, linked `RiskAssessment` (or `None` if unscored), customer recent transaction history, and related alerts.
-* `PATCH /api/investigations/{id}` — Update analyst notes, case conclusion, or close case.
-
-### 6. Customer Risk Profiles
-* `GET /api/customers/{id}/risk-profile` — Dedicated reader returning dynamic risk scores, risk levels, unique devices used, and unique locations used (returns 404 if customer is unscored).
-* `GET /api/customers` — Paginated customer directory with aggregate counters.
-* `GET /api/customers/{id}` — Single customer identity profile.
-
-### 7. AI Investigation Assistant
-* `POST /api/assistant/query` — Natural language Q&A endpoint powered by Google Gemini 2.5 Flash with database RAG context.
-  * Supports contextual inquiries regarding customer risk, device clusters, and case summaries.
-
-### 8. Fraud Alerts & Network Graph
+### 5. Investigations & Alerts
 * `GET /api/alerts` — List alerts with status and severity filters.
-* `POST /api/alerts/{id}/review` — Review alert status (`confirmed_fraud` / `false_positive`) and record analyst feedback for model improvement.
-* `GET /api/network` — Returns graph nodes (`customers`, `devices`, `ips`) and link edges for network visualization.
-* `GET /api/dashboard` — Aggregated KPI metrics, risk distributions, and 7-day trend activity.
+* `POST /api/alerts/{id}/review` — Review alert (`confirmed_fraud`, `false_positive`, `resolved`).
+* `GET /api/investigations` — List active and historical case investigations.
+* `POST /api/investigations` — Open a case investigation.
+* `GET /api/investigations/{id}` — **Unified Investigation Detail View** joining risk assessment, customer history, and related alerts.
+* `PATCH /api/investigations/{id}` — Update investigation notes and conclusions.
 
----
-
-## Environment Variables
-
-Configured in `backend/.env`:
-
-```env
-# PostgreSQL connection string (Supabase)
-DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<dbname>
-
-# JWT Security
-SECRET_KEY=your-production-secret-key
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-# CORS Whitelist (comma-separated origins)
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
-
-# Google Gemini API Key for LLM explanations and AI Assistant
-GEMINI_API_KEY=your-gemini-api-key
-```
+### 6. Customer Risk Profiles & Assistant
+* `GET /api/customers/{id}/risk-profile` — Dynamic customer risk metrics and level.
+* `POST /api/assistant/query` — Grounded natural language investigation assistant powered by Google Gemini 2.5 Flash.
+* `GET /api/network` — Graph dataset linking Customers, Devices, and IP addresses.
+* `GET /api/dashboard` — Platform overview KPIs, alerts breakdown, and risk distribution.
