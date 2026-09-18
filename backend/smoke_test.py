@@ -4,6 +4,13 @@ Run: python smoke_test.py
 """
 import os
 
+# Clean up old smoke test DB if present
+if os.path.exists("smoke_test.db"):
+    try:
+        os.remove("smoke_test.db")
+    except Exception:
+        pass
+
 # Must be set BEFORE importing app modules
 os.environ["DATABASE_URL"] = "sqlite:///./smoke_test.db"
 
@@ -12,15 +19,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.db.session import Base, engine, SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import *  # noqa: F401,F403
-from app.crud.fraud import create_user  # noqa: E402
+from app.crud.fraud import create_user, get_user_by_email  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
 client = TestClient(app)
 db = SessionLocal()
-create_user(db, "admin@test.io", "Passw0rd!", "Admin", "admin")
-create_user(db, "analyst@test.io", "Passw0rd!", "Analyst", "analyst")
+if not get_user_by_email(db, "admin@test.io"):
+    create_user(db, "admin@test.io", "Passw0rd!", "Admin", "admin")
+if not get_user_by_email(db, "analyst@test.io"):
+    create_user(db, "analyst@test.io", "Passw0rd!", "Analyst", "analyst")
 db.close()
+
 
 # --- 1. Login ---
 r = client.post("/api/auth/login", json={"email": "admin@test.io", "password": "Passw0rd!"})

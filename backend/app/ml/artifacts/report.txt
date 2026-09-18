@@ -1,0 +1,4 @@
+Final Risk Score	Risk Level	Possible Decision
+0–30	LOW	APPROVE
+31–70	MEDIUM	REVIEW
+71–100	HIGH	REVIEW or REJECT depending on final decision threshold

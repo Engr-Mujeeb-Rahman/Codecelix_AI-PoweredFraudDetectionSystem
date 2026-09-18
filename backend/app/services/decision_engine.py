@@ -181,7 +181,16 @@ def evaluate_transaction_risk(
         is_vpn=is_vpn,
         created_at=txn_time,
         rapid_count=rapid_count,
+        country=country,
+        city=city,
+        payment_method=payment_method,
+        device_type=device_info,
+        device_sharing_count=device_sharing_count,
+        ip_sharing_count=ip_sharing_count,
+        distance_km=5000.0 if impossible_travel else (1000.0 if is_new_country else 0.0),
+        is_new_location=is_new_country or impossible_travel,
     )
+
 
     # 6. Customer Behavior Score
     behavior_score = _compute_customer_behavior_score(customer, amount, pattern_results)

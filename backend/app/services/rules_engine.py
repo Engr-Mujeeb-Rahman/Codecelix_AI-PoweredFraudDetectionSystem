@@ -35,6 +35,8 @@ def _compare(actual: Any, op: str, target: Any) -> bool:
             return float(actual) <= float(target)
         elif op == "in":
             return actual in target
+        elif op in ("not_in", "not in"):
+            return actual not in target
         elif op == "contains":
             return str(target).lower() in str(actual).lower()
         return False
